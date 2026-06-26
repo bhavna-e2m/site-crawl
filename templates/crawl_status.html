@@ -15,13 +15,7 @@
   <p id="status-message" style="text-align:center; font-size:0.95rem; margin-bottom:1rem;">
     {{ status.message or 'Working...' }}
   </p>
-  <p id="status-hint" style="text-align:center; color:var(--muted); font-size:0.82rem;">
-    {% if is_vercel %}
-      Crawling on Vercel — keep this tab open. Large sites may hit the 60s serverless timeout.
-    {% else %}
-      You can leave this tab open. Large sites with metadata fetch may take 10–30+ minutes.
-    {% endif %}
-  </p>
+
   <div style="text-align:center; margin-top:1.25rem;">
     <a href="{{ url_for('index') }}" class="btn btn-ghost btn-sm">Back to home</a>
     <a href="{{ url_for('site_results', key=key) }}" id="view-results" class="btn btn-primary btn-sm" style="display:none;">View results</a>
