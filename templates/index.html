@@ -3,7 +3,7 @@
 {% block content %}
 <div class="card">
   <h2>Add &amp; crawl a site</h2>
-  <form class="add-form" action="{{ url_for('add_and_crawl') }}" method="post">
+  <form class="add-form" action="{{ url_for('add_and_crawl') }}" method="post" data-loading>
     <div class="input-row">
       <input type="url" name="url" placeholder="https://example.com" required autofocus>
       <button type="submit" class="btn btn-primary">Crawl site</button>
@@ -38,7 +38,7 @@
     </div>
     <div class="site-actions">
       <a href="{{ url_for('site_results', key=key) }}" class="btn btn-ghost btn-sm">View results</a>
-      <form action="{{ url_for('recrawl', key=key) }}" method="post" style="display:inline">
+      <form action="{{ url_for('recrawl', key=key) }}" method="post" style="display:inline" data-loading>
         <button type="submit" class="btn btn-ghost btn-sm">Re-crawl</button>
       </form>
       <form action="{{ url_for('remove_site', key=key) }}" method="post" style="display:inline" onsubmit="return confirm('Remove {{ key }}?')">

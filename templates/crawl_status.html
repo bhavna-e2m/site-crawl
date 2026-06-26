@@ -16,7 +16,11 @@
     {{ status.message or 'Working...' }}
   </p>
   <p id="status-hint" style="text-align:center; color:var(--muted); font-size:0.82rem;">
-    You can leave this tab open. Large sites with metadata fetch may take 10–30+ minutes.
+    {% if is_vercel %}
+      Crawling on Vercel — keep this tab open. Large sites may hit the 60s serverless timeout.
+    {% else %}
+      You can leave this tab open. Large sites with metadata fetch may take 10–30+ minutes.
+    {% endif %}
   </p>
   <div style="text-align:center; margin-top:1.25rem;">
     <a href="{{ url_for('index') }}" class="btn btn-ghost btn-sm">Back to home</a>
@@ -28,31 +32,94 @@
 {% block scripts %}
 <script>
   const statusUrl = "{{ url_for('crawl_status_api', key=key) }}";
+  const crawlUrl = "{{ url_for('api_start_crawl', key=key) }}";
   const resultsUrl = "{{ url_for('site_results', key=key) }}";
+  const crawlOptions = {
+    crawl_links: {{ crawl_links|tojson }},
+    fetch_pages: {{ fetch_pages|tojson }},
+  };
+  const initialState = {{ status.state|tojson }};
+
   const msg = document.getElementById("status-message");
   const viewBtn = document.getElementById("view-results");
   const hint = document.getElementById("status-hint");
+  const loading = document.getElementById("loading");
+
+  function showDone() {
+    hint.textContent = "Crawl complete.";
+    viewBtn.style.display = "inline-flex";
+    if (loading) loading.classList.remove("show");
+    setTimeout(() => { window.location.href = resultsUrl; }, 1500);
+  }
+
+  function showError(message) {
+    hint.textContent = "Crawl failed.";
+    msg.textContent = message || "Something went wrong.";
+    msg.style.color = "var(--error)";
+    if (loading) loading.classList.remove("show");
+  }
 
   async function poll() {
+    while (true) {
+      try {
+        const res = await fetch(statusUrl);
+        const data = await res.json();
+        if (data.message) msg.textContent = data.message;
+
+        if (data.state === "done") {
+          showDone();
+          return;
+        }
+        if (data.state === "error") {
+          showError(data.message);
+          return;
+        }
+      } catch (e) {}
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+
+  async function startCrawl() {
+    if (loading) {
+      loading.classList.add("show");
+      const loadingMsg = document.getElementById("loading-msg");
+      if (loadingMsg) {
+        if (crawlOptions.fetch_pages) {
+          loadingMsg.textContent = "Fetching titles, meta tags and page content… this may take several minutes.";
+        } else if (crawlOptions.crawl_links) {
+          loadingMsg.textContent = "Deep crawling site… this may take a couple of minutes.";
+        } else {
+          loadingMsg.textContent = "Discovering URLs… usually a few seconds.";
+        }
+      }
+    }
+
+    poll();
+
     try {
-      const res = await fetch(statusUrl);
+      const res = await fetch(crawlUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(crawlOptions),
+      });
       const data = await res.json();
       if (data.message) msg.textContent = data.message;
-
-      if (data.state === "done") {
-        hint.textContent = "Crawl complete.";
-        viewBtn.style.display = "inline-flex";
-        setTimeout(() => { window.location.href = resultsUrl; }, 1500);
-        return;
-      }
-      if (data.state === "error") {
-        hint.textContent = "Crawl failed.";
-        msg.style.color = "var(--error)";
-        return;
-      }
-    } catch (e) {}
-    setTimeout(poll, 2000);
+      if (data.state === "done") showDone();
+      else if (data.state === "error") showError(data.message);
+    } catch (e) {
+      showError("Request failed. The crawl may have timed out on Vercel (60s limit).");
+    }
   }
-  poll();
+
+  if (initialState === "done") {
+    showDone();
+  } else if (initialState === "error") {
+    showError({{ status.message|tojson }});
+  } else if (initialState === "running") {
+    if (loading) loading.classList.add("show");
+    poll();
+  } else {
+    startCrawl();
+  }
 </script>
 {% endblock %}

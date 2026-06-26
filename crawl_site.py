@@ -1166,11 +1166,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def find_available_port(host: str, start: int, limit: int = 20) -> int | None:
+    import socket
+
+    for port in range(start, start + limit):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            try:
+                sock.bind((host, port))
+                return port
+            except OSError:
+                continue
+    return None
+
+
 def cmd_ui(args: argparse.Namespace) -> int:
     from app import run_server
 
-    print(f"Open http://{args.host}:{args.port} in your browser", file=sys.stderr)
-    run_server(host=args.host, port=args.port)
+    port = args.port
+    if find_available_port(args.host, port, limit=1) is None:
+        next_port = find_available_port(args.host, port + 1)
+        if next_port is None:
+            print(
+                f"Ports {args.port}-{args.port + 20} are in use. "
+                f"Stop the other process or run: ./crawl ui --port <port>",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"Port {args.port} is in use; using {next_port} instead.",
+            file=sys.stderr,
+        )
+        port = next_port
+
+    print(f"Open http://{args.host}:{port} in your browser", file=sys.stderr)
+    run_server(host=args.host, port=port)
     return 0
 
 

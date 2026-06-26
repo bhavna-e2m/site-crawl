@@ -15,7 +15,7 @@
     <p style="color:var(--muted); font-size:0.8rem; margin-top:0.25rem;">Last crawled {{ info.last_crawled_at[:19].replace('T', ' ') }} UTC</p>
     {% endif %}
   </div>
-  <form action="{{ url_for('recrawl', key=key) }}" method="post" style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+  <form action="{{ url_for('recrawl', key=key) }}" method="post" style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;" data-loading>
     <label class="checkbox-row">
       <input type="checkbox" name="fetch_pages">
       Fetch titles &amp; meta

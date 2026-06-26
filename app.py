@@ -145,25 +145,6 @@ def run_crawl_sync(
         return "error", None
 
 
-def trigger_crawl(
-    key: str,
-    *,
-    crawl_links: bool,
-    fetch_pages: bool,
-) -> str:
-    """Start a crawl. On Vercel runs synchronously; locally uses a background thread."""
-    if IS_VERCEL:
-        state, _counts = run_crawl_sync(
-            key,
-            crawl_links=crawl_links,
-            fetch_pages=fetch_pages,
-        )
-        return state
-    if not start_background_crawl(key, crawl_links=crawl_links, fetch_pages=fetch_pages):
-        return "running"
-    return "started"
-
-
 @app.route("/")
 def index():
     sites = load_sites()
@@ -182,18 +163,14 @@ def add_and_crawl():
     fetch_pages = request.form.get("fetch_pages") == "on"
     key = register_site(url, force=True)
 
-    result = trigger_crawl(key, crawl_links=crawl_links, fetch_pages=fetch_pages)
-    if result == "running":
-        flash(f"Crawl already running for {key}.", "warning")
-        return redirect(url_for("crawl_status_page", key=key))
-    if result == "error":
-        flash(f"Crawl failed for {key}. See status for details.", "error")
-        return redirect(url_for("crawl_status_page", key=key))
-    if IS_VERCEL:
-        flash(f"Crawl complete for {key}.", "success")
-        return redirect(url_for("site_results", key=key))
-
-    return redirect(url_for("crawl_status_page", key=key))
+    return redirect(
+        url_for(
+            "crawl_status_page",
+            key=key,
+            crawl_links="1" if crawl_links else "0",
+            fetch_pages="1" if fetch_pages else "0",
+        )
+    )
 
 
 @app.route("/crawl-status/<key>")
@@ -202,8 +179,41 @@ def crawl_status_page(key: str):
     if key not in sites:
         flash(f"Site not found: {key}", "error")
         return redirect(url_for("index"))
-    status = read_crawl_status(key) or {"state": "unknown", "message": "No status yet."}
-    return render_template("crawl_status.html", key=key, info=sites[key], status=status)
+    status = read_crawl_status(key) or {"state": "pending", "message": "Preparing crawl..."}
+    crawl_links = request.args.get("crawl_links") == "1"
+    fetch_pages = request.args.get("fetch_pages") == "1"
+    return render_template(
+        "crawl_status.html",
+        key=key,
+        info=sites[key],
+        status=status,
+        crawl_links=crawl_links,
+        fetch_pages=fetch_pages,
+        is_vercel=IS_VERCEL,
+    )
+
+
+@app.route("/api/crawl/<key>", methods=["POST"])
+def api_start_crawl(key: str):
+    sites = load_sites()
+    if key not in sites:
+        return jsonify({"state": "error", "message": "Site not found"}), 404
+
+    existing = read_crawl_status(key)
+    if existing and existing.get("state") == "running":
+        return jsonify(existing)
+
+    data = request.get_json(silent=True) or {}
+    crawl_links = bool(data.get("crawl_links"))
+    fetch_pages = bool(data.get("fetch_pages"))
+
+    if IS_VERCEL:
+        run_crawl_sync(key, crawl_links=crawl_links, fetch_pages=fetch_pages)
+        return jsonify(read_crawl_status(key) or {"state": "error", "message": "Crawl finished without status."})
+
+    if not start_background_crawl(key, crawl_links=crawl_links, fetch_pages=fetch_pages):
+        return jsonify(read_crawl_status(key) or {"state": "running", "message": "Crawl already running."})
+    return jsonify(read_crawl_status(key) or {"state": "running", "message": "Starting crawl..."})
 
 
 @app.route("/api/crawl-status/<key>")
@@ -287,18 +297,14 @@ def recrawl(key: str):
     crawl_links = request.form.get("crawl_links") == "on"
     fetch_pages = request.form.get("fetch_pages") == "on"
 
-    result = trigger_crawl(key, crawl_links=crawl_links, fetch_pages=fetch_pages)
-    if result == "running":
-        flash(f"Crawl already running for {key}.", "warning")
-        return redirect(url_for("crawl_status_page", key=key))
-    if result == "error":
-        flash(f"Crawl failed for {key}. See status for details.", "error")
-        return redirect(url_for("crawl_status_page", key=key))
-    if IS_VERCEL:
-        flash(f"Crawl complete for {key}.", "success")
-        return redirect(url_for("site_results", key=key))
-
-    return redirect(url_for("crawl_status_page", key=key))
+    return redirect(
+        url_for(
+            "crawl_status_page",
+            key=key,
+            crawl_links="1" if crawl_links else "0",
+            fetch_pages="1" if fetch_pages else "0",
+        )
+    )
 
 
 @app.route("/remove/<key>", methods=["POST"])
