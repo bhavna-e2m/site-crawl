@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="card">
+  <h2>Add &amp; crawl a site</h2>
+  <form class="add-form" action="{{ url_for('add_and_crawl') }}" method="post">
+    <div class="input-row">
+      <input type="url" name="url" placeholder="https://example.com" required autofocus>
+      <button type="submit" class="btn btn-primary">Crawl site</button>
+    </div>
+    <label class="checkbox-row">
+      <input type="checkbox" name="fetch_pages" id="fetch_pages">
+      Fetch titles &amp; meta (slow on large sites — 3,000 URLs ≈ 15–30 min)
+    </label>
+    <label class="checkbox-row">
+      <input type="checkbox" name="crawl_links">
+      Deep crawl — also follow HTML links (slower, ~2+ min)
+    </label>
+  </form>
+</div>
+
+{% if sites %}
+<section class="sites-grid">
+  <h2 style="color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;">Recent sites</h2>
+  {% for key, info in sites %}
+  <div class="site-row">
+    <div>
+      <a href="{{ url_for('site_results', key=key) }}" class="site-name">{{ key }}</a>
+      <div class="site-meta">
+        {{ info.url }}
+        {% if info.last_crawled_at %}
+          · Last crawled {{ info.last_crawled_at[:19].replace('T', ' ') }} UTC
+        {% endif %}
+        {% if info.last_counts %}
+          · {{ info.last_counts.total }} URLs
+        {% endif %}
+      </div>
+    </div>
+    <div class="site-actions">
+      <a href="{{ url_for('site_results', key=key) }}" class="btn btn-ghost btn-sm">View results</a>
+      <form action="{{ url_for('recrawl', key=key) }}" method="post" style="display:inline">
+        <button type="submit" class="btn btn-ghost btn-sm">Re-crawl</button>
+      </form>
+      <form action="{{ url_for('remove_site', key=key) }}" method="post" style="display:inline" onsubmit="return confirm('Remove {{ key }}?')">
+        <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+      </form>
+    </div>
+  </div>
+  {% endfor %}
+</section>
+{% else %}
+<div class="empty card" style="margin-top: 2rem;">
+  <p>No sites yet. Enter a URL above to crawl products, collections, and pages.</p>
+</div>
+{% endif %}
+{% endblock %}

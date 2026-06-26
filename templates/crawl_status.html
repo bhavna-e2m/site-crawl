@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Crawling {{ key }} — Site Crawler{% endblock %}
+
+{% block content %}
+<div class="breadcrumb">
+  <a href="{{ url_for('index') }}">Home</a> / Crawling {{ key }}
+</div>
+
+<div class="card" style="max-width:640px; margin:2rem auto;">
+  <h2 style="font-size:1.25rem; font-weight:700; margin-bottom:0.5rem;">Crawling {{ key }}</h2>
+  <p style="color:var(--muted); font-size:0.9rem; margin-bottom:1.25rem;">{{ info.url }}</p>
+
+  <div class="spinner" style="margin:0 auto 1rem;"></div>
+  <p id="status-message" style="text-align:center; font-size:0.95rem; margin-bottom:1rem;">
+    {{ status.message or 'Working...' }}
+  </p>
+  <p id="status-hint" style="text-align:center; color:var(--muted); font-size:0.82rem;">
+    You can leave this tab open. Large sites with metadata fetch may take 10–30+ minutes.
+  </p>
+  <div style="text-align:center; margin-top:1.25rem;">
+    <a href="{{ url_for('index') }}" class="btn btn-ghost btn-sm">Back to home</a>
+    <a href="{{ url_for('site_results', key=key) }}" id="view-results" class="btn btn-primary btn-sm" style="display:none;">View results</a>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const statusUrl = "{{ url_for('crawl_status_api', key=key) }}";
+  const resultsUrl = "{{ url_for('site_results', key=key) }}";
+  const msg = document.getElementById("status-message");
+  const viewBtn = document.getElementById("view-results");
+  const hint = document.getElementById("status-hint");
+
+  async function poll() {
+    try {
+      const res = await fetch(statusUrl);
+      const data = await res.json();
+      if (data.message) msg.textContent = data.message;
+
+      if (data.state === "done") {
+        hint.textContent = "Crawl complete.";
+        viewBtn.style.display = "inline-flex";
+        setTimeout(() => { window.location.href = resultsUrl; }, 1500);
+        return;
+      }
+      if (data.state === "error") {
+        hint.textContent = "Crawl failed.";
+        msg.style.color = "var(--error)";
+        return;
+      }
+    } catch (e) {}
+    setTimeout(poll, 2000);
+  }
+  poll();
+</script>
+{% endblock %}
