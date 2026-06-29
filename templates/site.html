@@ -2,27 +2,37 @@
 
 {% block title %}{{ key }} — Site Crawler{% endblock %}
 
-{% block content %}
-<div class="breadcrumb">
-  <a href="{{ url_for('index') }}">Home</a> / {{ key }}
-</div>
+{% set title_labels = {
+  'products': 'Product title',
+  'collections': 'Collection title',
+  'pages': 'Page title'
+} %}
 
-<div style="display:flex; justify-content:space-between; align-items:flex-start; gap:1rem; flex-wrap:wrap; margin-bottom:1.5rem;">
+{% block content %}
+<nav class="breadcrumb">
+  <a href="{{ url_for('index') }}">Home</a>
+  <span class="sep">/</span>
+  <span>{{ key }}</span>
+</nav>
+
+<div class="page-header">
   <div>
-    <h2 style="font-size:1.5rem; font-weight:700; letter-spacing:-0.02em;">{{ key }}</h2>
-    <p style="color:var(--muted); font-size:0.9rem; margin-top:0.25rem;">{{ info.url }}</p>
-    {% if info.last_crawled_at %}
-    <p style="color:var(--muted); font-size:0.8rem; margin-top:0.25rem;">Last crawled {{ info.last_crawled_at[:19].replace('T', ' ') }} UTC</p>
-    {% endif %}
+    <h2>{{ key }}</h2>
+    <p class="subtitle">
+      <a href="{{ info.url }}" target="_blank" rel="noopener">{{ info.url }}</a>
+      {% if info.last_crawled_at %}
+      <br>Last crawled {{ info.last_crawled_at[:19].replace('T', ' ') }} UTC
+      {% endif %}
+    </p>
   </div>
-  <form action="{{ url_for('recrawl', key=key) }}" method="post" style="display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;" data-loading>
+  <form action="{{ url_for('recrawl', key=key) }}" method="post" class="recrawl-panel" data-loading>
     <label class="checkbox-row">
-      <input type="checkbox" name="fetch_pages">
-      Fetch titles &amp; meta
+      <input type="checkbox" name="fetch_pages" checked>
+      Meta
     </label>
     <label class="checkbox-row">
       <input type="checkbox" name="crawl_links">
-      Deep crawl
+      Deep
     </label>
     <button type="submit" class="btn btn-primary btn-sm">Re-crawl</button>
   </form>
@@ -49,94 +59,103 @@
 
 <div class="card">
   <div class="toolbar">
-    <div class="tabs">
-      <a href="{{ url_for('site_results', key=key, tab='products') }}" class="tab {% if tab == 'products' %}active{% endif %}">
-        Products ({{ counts.products }})
-      </a>
-      <a href="{{ url_for('site_results', key=key, tab='collections') }}" class="tab {% if tab == 'collections' %}active{% endif %}">
-        Collections ({{ counts.collections }})
-      </a>
-      <a href="{{ url_for('site_results', key=key, tab='pages') }}" class="tab {% if tab == 'pages' %}active{% endif %}">
-        Pages ({{ counts.pages }})
-      </a>
+    <div class="tabs" role="tablist">
+      {% for t in ['products', 'collections', 'pages'] %}
+      <button type="button" class="tab {% if tab == t %}active{% endif %}" data-tab="{{ t }}" role="tab" aria-selected="{{ 'true' if tab == t else 'false' }}">
+        {{ t|capitalize }} <strong>{{ counts[t] }}</strong>
+      </button>
+      {% endfor %}
     </div>
-    <input type="search" class="search-box" id="search" placeholder="Filter rows…">
+    <div class="search-wrap">
+      <input type="search" class="search-box" id="search" placeholder="Filter rows…">
+    </div>
   </div>
 
-  {% set current_urls = urls[tab] %}
-  {% set title_label = 'Product title' if tab == 'products' else ('Collection title' if tab == 'collections' else 'Page title') %}
+  {% for t in ['products', 'collections', 'pages'] %}
+  {% set detail = details[t] %}
+  {% set current_urls = urls[t] %}
+  {% set title_label = title_labels[t] %}
+  {% set row_count = detail|length if detail else current_urls|length %}
 
-  {% if detail %}
-  <div class="table-wrap">
-    <table class="data-table" id="data-table">
-      <thead>
-        <tr>
-          <th>URL</th>
-          <th>{{ title_label }}</th>
-          <th>Meta title</th>
-          <th>Meta description</th>
-          {% if tab == 'pages' %}<th>Content (HTML)</th>{% endif %}
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in detail %}
-        <tr data-search="{{ row.url|lower }} {{ row.title|lower }} {{ row.meta_title|lower }} {{ row.meta_description|lower }}">
-          <td class="col-url"><a href="{{ row.url }}" target="_blank" rel="noopener">{{ row.url }}</a></td>
-          <td>{{ row.title or '—' }}</td>
-          <td>{{ row.meta_title or '—' }}</td>
-          <td class="col-desc">{{ row.meta_description or '—' }}</td>
-          {% if tab == 'pages' %}
-          <td class="col-content-html">
-            {% if row.content_html %}
-            <pre class="content-html-pre">{{ row.content_html|e }}</pre>
-            {% else %}
-            —
+  <div class="tab-panel {% if tab == t %}active{% endif %}" data-tab="{{ t }}" role="tabpanel">
+    {% if detail or current_urls %}
+    <p class="row-count" data-row-count="{{ t }}">{{ row_count }} {{ t }} shown</p>
+    {% endif %}
+
+    {% if detail %}
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>URL</th>
+            <th>{{ title_label }}</th>
+            <th>Meta title</th>
+            <th>Meta description</th>
+            {% if t == 'pages' %}<th>Content (HTML)</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in detail %}
+          <tr data-search="{{ row.url|lower }} {{ row.title|lower }} {{ row.meta_title|lower }} {{ row.meta_description|lower }}">
+            <td class="col-url"><a href="{{ row.url }}" target="_blank" rel="noopener">{{ row.url }}</a></td>
+            <td>{{ row.title or '—' }}</td>
+            <td>{{ row.meta_title or '—' }}</td>
+            <td class="col-desc">{{ row.meta_description or '—' }}</td>
+            {% if t == 'pages' %}
+            <td class="col-content-html">
+              {% if row.content_html %}
+              <pre class="content-html-pre">{{ row.content_html|e }}</pre>
+              {% else %}
+              —
+              {% endif %}
+            </td>
             {% endif %}
-          </td>
-          {% endif %}
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  <p id="no-match" style="display:none; color:var(--muted); font-size:0.85rem; margin-top:0.75rem;">No rows match your filter.</p>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="no-match" data-no-match="{{ t }}" style="display:none; color:var(--muted); font-size:0.85rem; margin-top:0.75rem;">No rows match your filter.</p>
 
-  {% elif current_urls %}
-  <p class="flash warning" style="margin-bottom:0.85rem;">
-    {{ current_urls|length }} {{ tab }} URLs found. Re-crawl with <strong>Fetch titles &amp; meta</strong> checked to load the table.
-  </p>
-  <div class="table-wrap">
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th>URL</th>
-          <th>{{ title_label }}</th>
-          <th>Meta title</th>
-          <th>Meta description</th>
-          {% if tab == 'pages' %}<th>Content (HTML)</th>{% endif %}
-        </tr>
-      </thead>
-      <tbody>
-        {% for url in current_urls %}
-        <tr data-search="{{ url|lower }}">
-          <td class="col-url"><a href="{{ url }}" target="_blank" rel="noopener">{{ url }}</a></td>
-          <td>—</td><td>—</td><td>—</td>{% if tab == 'pages' %}<td>—</td>{% endif %}
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+    {% elif current_urls %}
+    <p class="flash warning" style="margin-bottom:0.85rem;">
+      {{ current_urls|length }} {{ t }} URLs found. Re-crawl with <strong>Meta</strong> enabled to load titles and descriptions.
+    </p>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>URL</th>
+            <th>{{ title_label }}</th>
+            <th>Meta title</th>
+            <th>Meta description</th>
+            {% if t == 'pages' %}<th>Content (HTML)</th>{% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for url in current_urls %}
+          <tr data-search="{{ url|lower }}">
+            <td class="col-url"><a href="{{ url }}" target="_blank" rel="noopener">{{ url }}</a></td>
+            <td>—</td><td>—</td><td>—</td>{% if t == 'pages' %}<td>—</td>{% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
 
-  {% else %}
-  <div class="empty">
-    <p>No {{ tab }} URLs found. Try re-crawling or enable deep crawl.</p>
+    {% else %}
+    <div class="empty">
+      <div class="empty-icon">📭</div>
+      <p>No {{ t }} URLs found. Try re-crawling or enable deep crawl.</p>
+    </div>
+    {% endif %}
   </div>
-  {% endif %}
+  {% endfor %}
 </div>
 
 {% if downloads %}
 <div class="downloads">
-  <span style="color:var(--muted); font-size:0.85rem; align-self:center;">Download:</span>
+  <span class="downloads-label">Export</span>
   {% for file in downloads %}
   <a href="{{ url_for('download', key=key, filename=file) }}" class="btn btn-ghost btn-sm">{{ file }}</a>
   {% endfor %}
@@ -146,21 +165,56 @@
 
 {% block scripts %}
 <script>
+  const tabs = document.querySelectorAll(".tab[data-tab]");
+  const panels = document.querySelectorAll(".tab-panel[data-tab]");
   const search = document.getElementById("search");
-  const noMatch = document.getElementById("no-match");
-  const rows = document.querySelectorAll("#data-table tbody tr, .data-table tbody tr");
+  let activeTab = {{ tab|tojson }};
 
-  if (search && rows.length) {
+  function switchTab(name) {
+    activeTab = name;
+    tabs.forEach(btn => {
+      const on = btn.dataset.tab === name;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    panels.forEach(panel => {
+      panel.classList.toggle("active", panel.dataset.tab === name);
+    });
+    const url = new URL(window.location);
+    url.searchParams.set("tab", name);
+    history.replaceState(null, "", url);
+    if (search) {
+      search.value = "";
+      filterRows("");
+    }
+  }
+
+  tabs.forEach(btn => {
+    btn.addEventListener("click", () => switchTab(btn.dataset.tab));
+  });
+
+  function filterRows(q) {
+    const panel = document.querySelector(`.tab-panel[data-tab="${activeTab}"]`);
+    if (!panel) return;
+    const rows = panel.querySelectorAll("tbody tr");
+    const noMatch = panel.querySelector(".no-match");
+    const rowCount = panel.querySelector("[data-row-count]");
+    let visible = 0;
+    rows.forEach(row => {
+      const haystack = row.dataset.search || row.textContent.toLowerCase();
+      const show = !q || haystack.includes(q);
+      row.style.display = show ? "" : "none";
+      if (show) visible++;
+    });
+    if (noMatch) noMatch.style.display = visible === 0 && q ? "block" : "none";
+    if (rowCount) {
+      rowCount.textContent = `${visible} ${activeTab} shown` + (q ? " (filtered)" : "");
+    }
+  }
+
+  if (search) {
     search.addEventListener("input", () => {
-      const q = search.value.trim().toLowerCase();
-      let visible = 0;
-      rows.forEach(row => {
-        const haystack = row.dataset.search || row.textContent.toLowerCase();
-        const show = !q || haystack.includes(q);
-        row.style.display = show ? "" : "none";
-        if (show) visible++;
-      });
-      if (noMatch) noMatch.style.display = visible === 0 ? "block" : "none";
+      filterRows(search.value.trim().toLowerCase());
     });
   }
 </script>

@@ -1,56 +1,74 @@
 {% extends "base.html" %}
 
 {% block content %}
-<div class="card">
-  <h2>Add &amp; crawl a site</h2>
+<div class="card card-elevated">
+  <div class="hero">
+    <h2>Crawl an ecommerce site</h2>
+    <p>Discover product, collection, and page URLs from Shopify, WooCommerce, Magento, and other platforms via sitemap.</p>
+  </div>
+
   <form class="add-form" action="{{ url_for('add_and_crawl') }}" method="post" data-loading>
     <div class="input-row">
-      <input type="url" name="url" placeholder="https://example.com" required autofocus>
-      <button type="submit" class="btn btn-primary">Crawl site</button>
+      <input type="url" name="url" placeholder="https://your-store.com" required autofocus>
+      <button type="submit" class="btn btn-primary">Crawl site →</button>
     </div>
-    <label class="checkbox-row">
-      <input type="checkbox" name="fetch_pages" id="fetch_pages">
-      Fetch titles &amp; meta (slow on large sites — 3,000 URLs ≈ 15–30 min)
-    </label>
-    <label class="checkbox-row">
-      <input type="checkbox" name="crawl_links">
-      Deep crawl — also follow HTML links (slower, ~2+ min)
-    </label>
+
+    <div class="options-grid">
+      <label class="option-card">
+        <input type="checkbox" name="fetch_pages" id="fetch_pages" checked>
+        <div>
+          <strong>Fetch titles &amp; meta</strong>
+          <span>Pull page titles, meta descriptions, and HTML content. Slow on large sites.</span>
+        </div>
+      </label>
+      <label class="option-card">
+        <input type="checkbox" name="crawl_links">
+        <div>
+          <strong>Deep crawl</strong>
+          <span>Follow HTML links in addition to sitemap. Takes longer but finds more URLs.</span>
+        </div>
+      </label>
+    </div>
   </form>
 </div>
 
 {% if sites %}
-<section class="sites-grid">
-  <h2 style="color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em;">Recent sites</h2>
-  {% for key, info in sites %}
-  <div class="site-row">
-    <div>
-      <a href="{{ url_for('site_results', key=key) }}" class="site-name">{{ key }}</a>
-      <div class="site-meta">
-        {{ info.url }}
-        {% if info.last_crawled_at %}
-          · Last crawled {{ info.last_crawled_at[:19].replace('T', ' ') }} UTC
-        {% endif %}
-        {% if info.last_counts %}
-          · {{ info.last_counts.total }} URLs
-        {% endif %}
+<section class="sites-section">
+  <p class="section-label">Recent sites · {{ sites|length }}</p>
+  <div class="sites-grid">
+    {% for key, info in sites %}
+    <div class="site-row">
+      <div>
+        <a href="{{ url_for('site_results', key=key) }}" class="site-name">{{ key }}</a>
+        <div class="site-meta">
+          <span>{{ info.url }}</span>
+          {% if info.last_crawled_at %}
+          <span class="dot">·</span>
+          <span>{{ info.last_crawled_at[:19].replace('T', ' ') }} UTC</span>
+          {% endif %}
+          {% if info.last_counts %}
+          <span class="badge accent">{{ info.last_counts.total }} URLs</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="site-actions">
+        <a href="{{ url_for('site_results', key=key) }}" class="btn btn-ghost btn-sm">View</a>
+        <form action="{{ url_for('recrawl', key=key) }}" method="post" style="display:inline" data-loading>
+          <input type="hidden" name="fetch_pages" value="on">
+          <button type="submit" class="btn btn-ghost btn-sm">Re-crawl</button>
+        </form>
+        <form action="{{ url_for('remove_site', key=key) }}" method="post" style="display:inline" onsubmit="return confirm('Remove {{ key }}?')">
+          <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+        </form>
       </div>
     </div>
-    <div class="site-actions">
-      <a href="{{ url_for('site_results', key=key) }}" class="btn btn-ghost btn-sm">View results</a>
-      <form action="{{ url_for('recrawl', key=key) }}" method="post" style="display:inline" data-loading>
-        <button type="submit" class="btn btn-ghost btn-sm">Re-crawl</button>
-      </form>
-      <form action="{{ url_for('remove_site', key=key) }}" method="post" style="display:inline" onsubmit="return confirm('Remove {{ key }}?')">
-        <button type="submit" class="btn btn-danger btn-sm">Remove</button>
-      </form>
-    </div>
+    {% endfor %}
   </div>
-  {% endfor %}
 </section>
 {% else %}
 <div class="empty card" style="margin-top: 2rem;">
-  <p>No sites yet. Enter a URL above to crawl products, collections, and pages.</p>
+  <div class="empty-icon">🔍</div>
+  <p>No sites crawled yet. Paste a store URL above to get started.</p>
 </div>
 {% endif %}
 {% endblock %}

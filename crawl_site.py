@@ -9,10 +9,13 @@ Squarespace, Wix, and other stores via sitemap + common URL patterns.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
 import sys
+import threading
+import time
 import warnings
 import xml.etree.ElementTree as ET
 from collections import deque
@@ -167,6 +170,8 @@ SITES_FILE = DATA_DIR / "sites.json"
 OUTPUT_DIR = DATA_DIR / "output"
 STATUS_DIR = DATA_DIR / "status"
 DEFAULT_FETCH_WORKERS = 20
+_status_write_lock = threading.Lock()
+_status_memory: dict[str, dict] = {}
 
 
 @dataclass
@@ -318,30 +323,151 @@ def add_classified(result: CrawlResult, url: str, *, kind: str | None = None) ->
         result.pages.add(url)
 
 
+def sitemap_root_tag(content: bytes) -> str | None:
+    for _event, elem in ET.iterparse(io.BytesIO(content), events=("start",)):
+        tag = elem.tag.rsplit("}", 1)[-1]
+        elem.clear()
+        return tag
+    return None
+
+
+def iter_sitemap_locs(content: bytes) -> Iterable[str]:
+    for _event, elem in ET.iterparse(io.BytesIO(content), events=("end",)):
+        if elem.tag.rsplit("}", 1)[-1] == "loc" and elem.text:
+            yield elem.text.strip()
+        elem.clear()
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def write_crawl_status(key: str, **fields) -> None:
-    STATUS_DIR.mkdir(parents=True, exist_ok=True)
-    path = STATUS_DIR / f"{key}.json"
-    current: dict = {}
-    if path.exists():
-        with path.open(encoding="utf-8") as fh:
-            current = json.load(fh)
-    current.update(fields)
-    current["updated_at"] = utc_now()
-    with path.open("w", encoding="utf-8") as fh:
-        json.dump(current, fh, indent=2)
-        fh.write("\n")
+PHASE_LABELS = {
+    "resolve": "Connecting to store",
+    "discover": "Discovering URLs from sitemap",
+    "save": "Saving sitemap files",
+    "metadata": "Fetching titles & metadata",
+    "finalize": "Finishing up",
+    "done": "Complete",
+}
 
 
-def read_crawl_status(key: str) -> dict | None:
-    path = STATUS_DIR / f"{key}.json"
-    if not path.exists():
+def _parse_iso(ts: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
         return None
-    with path.open(encoding="utf-8") as fh:
-        return json.load(fh)
+
+
+def compute_crawl_progress(status: dict) -> dict:
+    """Derive progress %, phase label, and ETA from structured crawl status fields."""
+    out = dict(status)
+    fetch_pages = bool(out.get("fetch_pages"))
+    phase = out.get("phase") or "discover"
+    explicit = int(out.get("progress") or 0)
+    computed = explicit
+
+    if phase == "resolve":
+        computed = max(computed, min(8, explicit or 3))
+
+    elif phase == "discover":
+        span = 22 if fetch_pages else 77
+        base = 8
+        s_done = int(out.get("sitemaps_done") or 0)
+        s_total = max(int(out.get("sitemaps_total") or 0), 1)
+        by_sitemap = base + int(span * 0.45 * s_done / s_total)
+        entries = int(out.get("discover_entries") or 0)
+        entry_cap = max(entries, 1)
+        by_entries = base + int(span * 0.55 * min(1.0, entries / (entry_cap + 1500)))
+        computed = max(computed, by_sitemap, by_entries, base)
+
+    elif phase == "save":
+        computed = max(computed, 30 if fetch_pages else 92)
+
+    elif phase == "metadata":
+        done = int(out.get("progress_done") or 0)
+        total = max(int(out.get("progress_total") or 0), 1)
+        computed = max(computed, 35 + int(63 * done / total))
+
+    elif phase in ("finalize", "done"):
+        computed = 100
+
+    computed = min(99 if out.get("state") == "running" else 100, max(0, computed))
+    out["progress"] = computed
+    out["display_progress"] = computed
+    out["phase_label"] = PHASE_LABELS.get(phase, phase.replace("_", " ").title())
+
+    counts = out.get("counts")
+    if isinstance(counts, dict):
+        out["counts"] = {
+            "products": int(counts.get("products") or 0),
+            "collections": int(counts.get("collections") or 0),
+            "pages": int(counts.get("pages") or 0),
+            "total": int(counts.get("total") or 0),
+        }
+    else:
+        out["counts"] = {"products": 0, "collections": 0, "pages": 0, "total": 0}
+
+    if not out["counts"]["total"]:
+        out["counts"]["total"] = (
+            out["counts"]["products"]
+            + out["counts"]["collections"]
+            + out["counts"]["pages"]
+        )
+
+    started = _parse_iso(out.get("started_at", ""))
+    done = int(out.get("progress_done") or 0)
+    total = int(out.get("progress_total") or 0)
+    if (
+        phase == "metadata"
+        and started
+        and done >= 5
+        and total > done
+    ):
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        if elapsed > 0:
+            rate = done / elapsed
+            out["eta_seconds"] = max(1, int((total - done) / rate))
+            out["pages_per_second"] = round(rate, 2)
+
+    return out
+
+
+def write_crawl_status(key: str, **fields) -> None:
+    with _status_write_lock:
+        STATUS_DIR.mkdir(parents=True, exist_ok=True)
+        path = STATUS_DIR / f"{key}.json"
+        current: dict = dict(_status_memory.get(key) or {})
+        if not current and path.exists():
+            with path.open(encoding="utf-8") as fh:
+                current = json.load(fh)
+        current.update(fields)
+        if current.get("state") == "running" and not current.get("started_at"):
+            current["started_at"] = utc_now()
+        current["updated_at"] = utc_now()
+        current["revision"] = int(current.get("revision") or 0) + 1
+        current = compute_crawl_progress(current)
+        _status_memory[key] = current
+        tmp = path.with_suffix(".json.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            json.dump(current, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+        tmp.replace(path)
+
+
+def read_crawl_status(key: str, *, enrich: bool = False) -> dict | None:
+    with _status_write_lock:
+        if key in _status_memory:
+            data = dict(_status_memory[key])
+        else:
+            path = STATUS_DIR / f"{key}.json"
+            if not path.exists():
+                return None
+            with path.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+            _status_memory[key] = dict(data)
+    return compute_crawl_progress(data) if enrich else data
 
 
 def _meta_content(soup: BeautifulSoup, *, name: str | None = None, prop: str | None = None) -> str:
@@ -453,11 +579,12 @@ def enrich_url_details(
     site_dir: Path,
     output_filename: str,
     json_key: str,
-    on_progress: Callable[[str], None] | None = None,
+    on_progress: Callable[..., None] | None = None,
     *,
     include_content: bool = False,
     content_subdir: str | None = None,
     workers: int = DEFAULT_FETCH_WORKERS,
+    on_item_done: Callable[[int, int], None] | None = None,
 ) -> str:
     url_list = sorted(urls)
     total = len(url_list)
@@ -526,10 +653,12 @@ def enrich_url_details(
         futures = {pool.submit(fetch_one, page_url): page_url for page_url in url_list}
         for future in as_completed(futures):
             completed += 1
+            if on_item_done:
+                on_item_done(completed, total)
             if on_progress:
                 page_url = futures[future]
                 path = urlparse(page_url).path or "/"
-                on_progress(f"  {json_key}: {completed}/{total} {path}")
+                on_progress(f"{json_key}: {completed}/{total} {path}")
             details.append(future.result())
 
     details.sort(key=lambda item: item["url"])
@@ -543,9 +672,10 @@ def enrich_page_details(
     crawler: SiteCrawler,
     page_urls: Iterable[str],
     site_dir: Path,
-    on_progress: Callable[[str], None] | None = None,
+    on_progress: Callable[..., None] | None = None,
     *,
     workers: int = DEFAULT_FETCH_WORKERS,
+    on_item_done: Callable[[int, int], None] | None = None,
 ) -> str:
     return enrich_url_details(
         crawler,
@@ -557,6 +687,7 @@ def enrich_page_details(
         include_content=True,
         content_subdir="pages_content",
         workers=workers,
+        on_item_done=on_item_done,
     )
 
 
@@ -583,11 +714,15 @@ class SiteCrawler:
         max_pages: int = 500,
         respect_robots: bool = True,
         user_agent: str = "SiteCrawler/1.0",
+        skip_resolve: bool = False,
     ) -> None:
         if not base_url.startswith(("http://", "https://")):
             base_url = "https://" + base_url
 
-        base_url = resolve_canonical_url(base_url, timeout=timeout)
+        if skip_resolve:
+            base_url = normalize_url(base_url)
+        else:
+            base_url = resolve_canonical_url(base_url, timeout=timeout)
         parsed = urlparse(base_url)
         self.base_url = urlunparse((parsed.scheme, parsed.netloc.lower(), "", "", "", ""))
         self.base_netloc = parsed.netloc.lower()
@@ -598,11 +733,11 @@ class SiteCrawler:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": user_agent})
         self._robots: RobotFileParser | None = None
-        self.on_progress: Callable[[str], None] | None = None
+        self.on_progress: Callable[..., None] | None = None
 
-    def _progress(self, message: str) -> None:
+    def _progress(self, message: str, **extra) -> None:
         if self.on_progress:
-            self.on_progress(message)
+            self.on_progress(message, **extra)
 
     def _load_robots(self) -> RobotFileParser:
         if self._robots is not None:
@@ -655,7 +790,30 @@ class SiteCrawler:
         result = CrawlResult()
         visited_sitemaps: set[str] = set()
         queue: deque[str] = deque(self.discover_sitemap_seeds())
-        self._progress("Reading sitemap.xml (fast mode)...")
+        discover_entries = 0
+        last_status_at = time.monotonic()
+
+        def discover_status(message: str, **extra) -> None:
+            nonlocal last_status_at
+            last_status_at = time.monotonic()
+            extra.setdefault("phase", "discover")
+            extra["counts"] = {
+                "products": len(result.products),
+                "collections": len(result.collections),
+                "pages": len(result.pages),
+                "total": result.total,
+            }
+            extra["sitemaps_done"] = len(visited_sitemaps)
+            extra["sitemaps_total"] = len(visited_sitemaps) + len(queue)
+            extra["discover_entries"] = discover_entries
+            self._progress(message, **extra)
+
+        def maybe_status(message: str, *, force: bool = False) -> None:
+            now = time.monotonic()
+            if force or now - last_status_at >= 0.4:
+                discover_status(message)
+
+        discover_status("Reading sitemap.xml…", progress=8)
 
         while queue:
             current = queue.popleft()
@@ -663,44 +821,63 @@ class SiteCrawler:
                 continue
             visited_sitemaps.add(current)
 
-            self._progress(f"  sitemap: {urlparse(current).path.rsplit('/', 1)[-1]}")
+            name = urlparse(current).path.rsplit("/", 1)[-1] or "sitemap"
+            discover_status(f"Reading {name}…")
 
             response = self.fetch(current)
             if response is None:
                 continue
 
+            content = response.content
             try:
-                root = ET.fromstring(response.content)
+                tag = sitemap_root_tag(content)
             except ET.ParseError:
                 continue
-
-            tag = root.tag.rsplit("}", 1)[-1]
+            if not tag:
+                continue
 
             if tag == "sitemapindex":
-                for loc in root.findall(".//sm:loc", SITEMAP_NS_MAP):
-                    if loc.text:
-                        child = loc.text.strip()
-                        if should_fetch_sitemap(child):
-                            queue.append(child)
+                added = 0
+                for loc_text in iter_sitemap_locs(content):
+                    if should_fetch_sitemap(loc_text):
+                        queue.append(loc_text)
+                        added += 1
+                discover_status(
+                    f"Indexed {name} — {added:,} sitemaps queued "
+                    f"({len(result.products):,} products, "
+                    f"{len(result.collections):,} collections, "
+                    f"{len(result.pages):,} pages so far)",
+                )
                 continue
 
             if tag == "urlset":
                 sitemap_kind = classify_sitemap_kind(current)
                 found = 0
-                for loc in root.findall(".//sm:loc", SITEMAP_NS_MAP):
-                    if not loc.text:
-                        continue
-                    url = normalize_url(loc.text.strip())
-                    if not same_site(url, self.base_netloc):
-                        continue
-                    kind = sitemap_kind or classify_url(url)
-                    if kind is None:
-                        continue
-                    before = result.total
-                    add_classified(result, url, kind=kind)
-                    if result.total > before:
-                        found += 1
-                self._progress(f"    found {found} URLs")
+                processed = 0
+                for loc_text in iter_sitemap_locs(content):
+                    processed += 1
+                    discover_entries += 1
+                    url = normalize_url(loc_text)
+                    if same_site(url, self.base_netloc):
+                        kind = sitemap_kind or classify_url(url)
+                        if kind is not None:
+                            before = result.total
+                            add_classified(result, url, kind=kind)
+                            if result.total > before:
+                                found += 1
+                    if processed % 25 == 0:
+                        maybe_status(
+                            f"{name}: {processed:,} entries — "
+                            f"{len(result.products):,} products, "
+                            f"{len(result.collections):,} collections, "
+                            f"{len(result.pages):,} pages",
+                        )
+                discover_status(
+                    f"{name}: +{found:,} URLs — "
+                    f"{len(result.products):,} products, "
+                    f"{len(result.collections):,} collections, "
+                    f"{len(result.pages):,} pages",
+                )
 
         return result
 
@@ -791,7 +968,7 @@ def generate_sitemaps(
     site_dir: Path,
     *,
     crawler: SiteCrawler | None = None,
-    on_progress: Callable[[str], None] | None = None,
+    on_progress: Callable[..., None] | None = None,
     fetch_pages: bool = False,
     fetch_workers: int = DEFAULT_FETCH_WORKERS,
 ) -> dict[str, str]:
@@ -826,9 +1003,47 @@ def generate_sitemaps(
     files["urls_json"] = str(urls_json)
 
     if fetch_pages and crawler is not None:
+        meta_total = len(result.products) + len(result.collections) + len(result.pages)
+        meta_state = {"done": 0}
+
+        if on_progress and meta_total:
+            on_progress(
+                f"Fetching titles & metadata (0/{meta_total:,})…",
+                phase="metadata",
+                progress=35,
+                progress_done=0,
+                progress_total=meta_total,
+                counts={
+                    "products": len(result.products),
+                    "collections": len(result.collections),
+                    "pages": len(result.pages),
+                    "total": meta_total,
+                },
+            )
+
+        def meta_item_done(_completed: int, _batch_total: int) -> None:
+            meta_state["done"] += 1
+            if not meta_total or not on_progress:
+                return
+            done = meta_state["done"]
+            if done % 3 != 0 and done != meta_total:
+                return
+            on_progress(
+                f"Fetching titles & metadata ({done:,}/{meta_total:,})…",
+                phase="metadata",
+                progress_done=done,
+                progress_total=meta_total,
+                counts={
+                    "products": len(result.products),
+                    "collections": len(result.collections),
+                    "pages": len(result.pages),
+                    "total": meta_total,
+                },
+            )
+
         if result.products:
             if on_progress:
-                on_progress(f"Fetching metadata for {len(result.products)} products...")
+                on_progress(f"Fetching metadata for {len(result.products)} products...", progress=28)
             files["products_detail"] = enrich_url_details(
                 crawler,
                 result.products,
@@ -837,10 +1052,14 @@ def generate_sitemaps(
                 "products",
                 on_progress,
                 workers=fetch_workers,
+                on_item_done=meta_item_done,
             )
         if result.collections:
             if on_progress:
-                on_progress(f"Fetching metadata for {len(result.collections)} collections...")
+                on_progress(
+                    f"Fetching metadata for {len(result.collections)} collections...",
+                    progress=28 + int(67 * meta_state["done"] / meta_total) if meta_total else 28,
+                )
             files["collections_detail"] = enrich_url_details(
                 crawler,
                 result.collections,
@@ -849,16 +1068,21 @@ def generate_sitemaps(
                 "collections",
                 on_progress,
                 workers=fetch_workers,
+                on_item_done=meta_item_done,
             )
         if result.pages:
             if on_progress:
-                on_progress(f"Fetching metadata and content for {len(result.pages)} pages...")
+                on_progress(
+                    f"Fetching metadata for {len(result.pages)} pages...",
+                    progress=28 + int(67 * meta_state["done"] / meta_total) if meta_total else 28,
+                )
             files["pages_detail"] = enrich_page_details(
                 crawler,
                 result.pages,
                 site_dir,
                 on_progress=on_progress,
                 workers=fetch_workers,
+                on_item_done=meta_item_done,
             )
 
     return files
@@ -889,7 +1113,7 @@ def crawl_and_save(
     timeout: int = 15,
     respect_robots: bool = True,
     fetch_workers: int = DEFAULT_FETCH_WORKERS,
-    on_progress: Callable[[str], None] | None = None,
+    on_progress: Callable[..., None] | None = None,
     status_key: str | None = None,
 ) -> tuple[CrawlResult, dict[str, str], dict[str, int]]:
     sites = load_sites()
@@ -900,20 +1124,27 @@ def crawl_and_save(
 
     def report(message: str, **extra) -> None:
         if on_progress:
-            on_progress(message)
+            on_progress(message, **extra)
         if status_key is not None:
             write_crawl_status(status_id, message=message, state="running", **extra)
 
-    report("Discovering URLs from sitemap...", phase="discover")
+    report("Discovering URLs from sitemap…", phase="discover", progress=5)
 
     url = sites[key]["url"]
+    report("Resolving store URL…", phase="resolve", progress=3)
+    resolved_url = resolve_canonical_url(url, timeout=timeout)
+    report("Store URL ready.", phase="resolve", progress=8)
+
     crawler = SiteCrawler(
-        url,
+        resolved_url,
         timeout=timeout,
         max_pages=max_pages,
         respect_robots=respect_robots,
+        skip_resolve=True,
     )
+    report("Reading robots.txt and sitemap index…", phase="discover", progress=8)
     crawler.on_progress = report
+
     result = crawler.run(use_sitemap=True, use_crawl=crawl_links)
 
     counts = {
@@ -923,9 +1154,12 @@ def crawl_and_save(
         "total": result.total,
     }
     report(
-        f"Found {counts['total']} URLs. Saving sitemaps...",
+        f"Found {counts['total']:,} URLs — "
+        f"{counts['products']:,} products, {counts['collections']:,} collections, "
+        f"{counts['pages']:,} pages. Saving sitemaps…",
         phase="save",
         counts=counts,
+        progress=30 if fetch_pages else 92,
     )
 
     site_dir = OUTPUT_DIR / key
@@ -937,6 +1171,14 @@ def crawl_and_save(
         fetch_pages=fetch_pages,
         fetch_workers=fetch_workers,
     )
+    if not fetch_pages:
+        report(
+            f"Sitemaps saved — {counts['products']:,} products, "
+            f"{counts['collections']:,} collections, {counts['pages']:,} pages",
+            phase="finalize",
+            counts=counts,
+            progress=100,
+        )
     info = sites[key]
     info["last_crawled_at"] = utc_now()
     info["last_counts"] = counts

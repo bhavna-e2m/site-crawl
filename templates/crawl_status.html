@@ -2,118 +2,379 @@
 
 {% block title %}Crawling {{ key }} — Site Crawler{% endblock %}
 
+{% block extra_head %}
+<style>
+  .status-card {
+    max-width: 560px;
+  }
+
+  .crawl-phase {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--accent);
+    background: var(--accent-dim);
+    border: 1px solid rgba(77, 163, 255, 0.3);
+    padding: 0.3rem 0.65rem;
+    border-radius: 999px;
+    margin-bottom: 1rem;
+  }
+
+  .crawl-counts {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.65rem;
+    margin: 1.25rem 0 0.5rem;
+    text-align: left;
+  }
+
+  .crawl-count {
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 0.75rem 0.65rem;
+    text-align: center;
+  }
+
+  .crawl-count .num {
+    display: block;
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+  }
+
+  .crawl-count .lbl {
+    display: block;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--muted);
+    margin-top: 0.25rem;
+  }
+
+  .crawl-count.products .num { color: var(--products); }
+  .crawl-count.collections .num { color: var(--collections); }
+  .crawl-count.pages .num { color: var(--pages); }
+
+  .progress-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin-top: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .crawl-count .num.bump {
+    animation: countBump 0.35s ease-out;
+  }
+
+  @keyframes countBump {
+    0% { transform: scale(1); }
+    40% { transform: scale(1.08); }
+    100% { transform: scale(1); }
+  }
+</style>
+{% endblock %}
+
 {% block content %}
-<div class="breadcrumb">
-  <a href="{{ url_for('index') }}">Home</a> / Crawling {{ key }}
-</div>
+<nav class="breadcrumb">
+  <a href="{{ url_for('index') }}">Home</a>
+  <span class="sep">/</span>
+  <span>Crawling {{ key }}</span>
+</nav>
 
-<div class="card" style="max-width:640px; margin:2rem auto;">
-  <h2 style="font-size:1.25rem; font-weight:700; margin-bottom:0.5rem;">Crawling {{ key }}</h2>
-  <p style="color:var(--muted); font-size:0.9rem; margin-bottom:1.25rem;">{{ info.url }}</p>
+<div class="card status-card">
+  <div class="spinner spinner-lg" style="margin:0 auto 1.25rem;"></div>
+  <h2>Crawling {{ key }}</h2>
+  <p class="url">{{ info.url }}</p>
 
-  <div class="spinner" style="margin:0 auto 1rem;"></div>
-  <p id="status-message" style="text-align:center; font-size:0.95rem; margin-bottom:1rem;">
-    {{ status.message or 'Working...' }}
+  <p class="crawl-phase" id="phase-label">{{ status.phase_label|default('Starting crawl') }}</p>
+
+  <div class="crawl-counts">
+    <div class="crawl-count products">
+      <span class="num" id="count-products">{{ (status.counts.products if status.counts else 0)|default(0) }}</span>
+      <span class="lbl">Products</span>
+    </div>
+    <div class="crawl-count collections">
+      <span class="num" id="count-collections">{{ (status.counts.collections if status.counts else 0)|default(0) }}</span>
+      <span class="lbl">Collections</span>
+    </div>
+    <div class="crawl-count pages">
+      <span class="num" id="count-pages">{{ (status.counts.pages if status.counts else 0)|default(0) }}</span>
+      <span class="lbl">Pages</span>
+    </div>
+  </div>
+
+  <div class="progress-track" id="progress-track">
+    <div class="progress-bar" id="progress-bar"></div>
+  </div>
+  <div class="progress-meta">
+    <span class="progress-label" id="progress-label">{{ status.display_progress|default(status.progress)|default(0) }}%</span>
+    <span class="eta" id="eta-label"></span>
+  </div>
+  <p class="progress-detail" id="progress-detail" style="font-size:12px;color:var(--muted);margin-top:8px;"></p>
+  <p id="sync-label" style="font-size:11px;color:var(--muted);opacity:0.7;margin-top:4px;"></p>
+
+  <p class="status-message" id="status-message">{{ status.message or 'Starting crawl…' }}</p>
+  <p class="status-hint" id="status-hint">
+    {% if is_vercel %}
+      Keep this tab open. Vercel has a 60s timeout — use sitemap-only crawls for best results.
+    {% else %}
+      Counts update live as sitemaps are read. With metadata fetch, expect ~1–3 pages/sec per store.
+    {% endif %}
   </p>
 
-  <div style="text-align:center; margin-top:1.25rem;">
+  <div class="status-actions">
     <a href="{{ url_for('index') }}" class="btn btn-ghost btn-sm">Back to home</a>
-    <a href="{{ url_for('site_results', key=key) }}" id="view-results" class="btn btn-primary btn-sm" style="display:none;">View results</a>
+    <a href="{{ url_for('site_results', key=key) }}" id="view-results" class="btn btn-primary btn-sm" style="display:none;">View results →</a>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
+(function () {
   const statusUrl = "{{ url_for('crawl_status_api', key=key) }}";
   const crawlUrl = "{{ url_for('api_start_crawl', key=key) }}";
   const resultsUrl = "{{ url_for('site_results', key=key) }}";
+  const isVercel = {{ is_vercel|tojson }};
   const crawlOptions = {
     crawl_links: {{ crawl_links|tojson }},
     fetch_pages: {{ fetch_pages|tojson }},
   };
-  const initialState = {{ status.state|tojson }};
+  let crawlState = {{ status.state|tojson }};
 
-  const msg = document.getElementById("status-message");
-  const viewBtn = document.getElementById("view-results");
-  const hint = document.getElementById("status-hint");
-  const loading = document.getElementById("loading");
+  const els = {
+    msg: document.getElementById("status-message"),
+    viewBtn: document.getElementById("view-results"),
+    hint: document.getElementById("status-hint"),
+    progressBar: document.getElementById("progress-bar"),
+    progressLabel: document.getElementById("progress-label"),
+    progressDetail: document.getElementById("progress-detail"),
+    syncLabel: document.getElementById("sync-label"),
+    phaseLabel: document.getElementById("phase-label"),
+    etaLabel: document.getElementById("eta-label"),
+    countProducts: document.getElementById("count-products"),
+    countCollections: document.getElementById("count-collections"),
+    countPages: document.getElementById("count-pages"),
+    loading: document.getElementById("loading"),
+  };
 
-  function showDone() {
-    hint.textContent = "Crawl complete.";
-    viewBtn.style.display = "inline-flex";
-    if (loading) loading.classList.remove("show");
-    setTimeout(() => { window.location.href = resultsUrl; }, 1500);
+  if (els.loading) els.loading.classList.remove("show");
+
+  let serverPct = Number({{ status.display_progress|default(status.progress)|default(0)|tojson }}) || 0;
+  let displayPct = serverPct;
+  let finished = false;
+  let running = crawlState !== "done" && crawlState !== "error";
+  let lastFrame = performance.now();
+  let pollTimer = null;
+
+  function fmt(n) {
+    return Number(n || 0).toLocaleString();
   }
 
-  function showError(message) {
-    hint.textContent = "Crawl failed.";
-    msg.textContent = message || "Something went wrong.";
-    msg.style.color = "var(--error)";
-    if (loading) loading.classList.remove("show");
+  function fmtEta(seconds) {
+    if (!seconds || seconds < 1) return "";
+    if (seconds < 60) return "~" + Math.ceil(seconds) + "s left";
+    if (seconds < 3600) return "~" + Math.ceil(seconds / 60) + " min left";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.ceil((seconds % 3600) / 60);
+    return "~" + h + "h " + m + "m left";
   }
 
-  async function poll() {
-    while (true) {
-      try {
-        const res = await fetch(statusUrl);
-        const data = await res.json();
-        if (data.message) msg.textContent = data.message;
-
-        if (data.state === "done") {
-          showDone();
-          return;
-        }
-        if (data.state === "error") {
-          showError(data.message);
-          return;
-        }
-      } catch (e) {}
-      await new Promise(r => setTimeout(r, 2000));
-    }
+  function parseCountsFromMessage(text) {
+    if (!text) return null;
+    const m = text.match(
+      /(\d[\d,]*)\s+products,\s*(\d[\d,]*)\s+collections,\s*(\d[\d,]*)\s+pages/i
+    );
+    if (!m) return null;
+    return {
+      products: parseInt(m[1].replace(/,/g, ""), 10),
+      collections: parseInt(m[2].replace(/,/g, ""), 10),
+      pages: parseInt(m[3].replace(/,/g, ""), 10),
+    };
   }
 
-  async function startCrawl() {
-    if (loading) {
-      loading.classList.add("show");
-      const loadingMsg = document.getElementById("loading-msg");
-      if (loadingMsg) {
-        if (crawlOptions.fetch_pages) {
-          loadingMsg.textContent = "Fetching titles, meta tags and page content… this may take several minutes.";
-        } else if (crawlOptions.crawl_links) {
-          loadingMsg.textContent = "Deep crawling site… this may take a couple of minutes.";
-        } else {
-          loadingMsg.textContent = "Discovering URLs… usually a few seconds.";
-        }
+  function countsFrom(data) {
+    const c = data.counts || {};
+    const m = parseCountsFromMessage(data.message) || {};
+    return {
+      products: Math.max(Number(c.products) || 0, Number(m.products) || 0),
+      collections: Math.max(Number(c.collections) || 0, Number(m.collections) || 0),
+      pages: Math.max(Number(c.pages) || 0, Number(m.pages) || 0),
+    };
+  }
+
+  function paint() {
+    const clamped = Math.min(100, Math.max(0, displayPct));
+    if (els.progressBar) els.progressBar.style.transform = "scaleX(" + (clamped / 100) + ")";
+    if (els.progressLabel) els.progressLabel.textContent = Math.round(clamped) + "%";
+  }
+
+  function applyStatus(data) {
+    if (!data) return;
+    crawlState = data.state || crawlState;
+
+    if (data.message && els.msg) els.msg.textContent = data.message;
+    if (data.phase_label && els.phaseLabel) els.phaseLabel.textContent = data.phase_label;
+
+    const pct = data.display_progress != null ? Number(data.display_progress) : Number(data.progress);
+    if (!Number.isNaN(pct)) serverPct = Math.max(serverPct, pct);
+    if (data.state === "running" || data.state === "pending") running = true;
+
+    const counts = countsFrom(data);
+    if (els.countProducts) els.countProducts.textContent = fmt(counts.products);
+    if (els.countCollections) els.countCollections.textContent = fmt(counts.collections);
+    if (els.countPages) els.countPages.textContent = fmt(counts.pages);
+
+    const total = counts.products + counts.collections + counts.pages;
+    if (els.progressDetail) {
+      if (data.phase === "metadata" && data.progress_total > 0) {
+        const done = Number(data.progress_done) || 0;
+        let line = "Fetched " + fmt(done) + " of " + fmt(data.progress_total) + " pages";
+        if (data.pages_per_second) line += " · " + data.pages_per_second + "/sec";
+        els.progressDetail.textContent = line;
+      } else if (data.phase === "discover" && data.sitemaps_total > 0) {
+        let line = "Sitemap " + (data.sitemaps_done || 0) + " / " + data.sitemaps_total;
+        if (data.discover_entries) line += " · " + fmt(data.discover_entries) + " entries scanned";
+        els.progressDetail.textContent = line;
+      } else if (total > 0) {
+        els.progressDetail.textContent = fmt(total) + " URLs discovered so far";
       }
     }
 
-    poll();
+    if (els.etaLabel) els.etaLabel.textContent = data.eta_seconds ? fmtEta(data.eta_seconds) : "";
+    if (els.syncLabel) {
+      const t = data.updated_at ? new Date(data.updated_at) : new Date();
+      els.syncLabel.textContent = "Live · updated " + t.toLocaleTimeString();
+    }
+  }
 
+  function tick(now) {
+    if (finished) return;
+    const dt = Math.min((now - lastFrame) / 1000, 0.25);
+    lastFrame = now;
+    if (running) {
+      const goal = Math.max(serverPct, Math.min(97, displayPct + 0.25 * dt));
+      displayPct += (goal - displayPct) * Math.min(1, dt * 5);
+      if (serverPct > displayPct) displayPct = serverPct;
+    }
+    paint();
+    requestAnimationFrame(tick);
+  }
+
+  paint();
+  requestAnimationFrame(tick);
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  function showDone() {
+    finished = true;
+    running = false;
+    stopPolling();
+    serverPct = 100;
+    displayPct = 100;
+    paint();
+    if (els.phaseLabel) els.phaseLabel.textContent = "Complete";
+    if (els.etaLabel) els.etaLabel.textContent = "";
+    if (els.hint) els.hint.textContent = "Crawl complete — redirecting to results…";
+    if (els.viewBtn) els.viewBtn.style.display = "inline-flex";
+    if (els.loading) els.loading.classList.remove("show");
+    setTimeout(function () { window.location.href = resultsUrl; }, 1200);
+  }
+
+  function showError(message) {
+    finished = true;
+    running = false;
+    stopPolling();
+    if (els.hint) els.hint.textContent = "Crawl failed.";
+    if (els.msg) {
+      els.msg.textContent = message || "Something went wrong.";
+      els.msg.style.color = "var(--error)";
+    }
+    if (els.loading) els.loading.classList.remove("show");
+    paint();
+  }
+
+  async function refreshStatus() {
+    const res = await fetch(statusUrl + "?_=" + Date.now(), {
+      method: "GET",
+      cache: "no-store",
+      headers: { "Accept": "application/json", "Cache-Control": "no-cache" },
+    });
+    if (!res.ok) throw new Error("status " + res.status);
+    const data = await res.json();
+    applyStatus(data);
+    if (data.state === "done") { showDone(); return; }
+    if (data.state === "error") { showError(data.message); return; }
+  }
+
+  function startPolling() {
+    stopPolling();
+    refreshStatus().catch(function () {});
+    pollTimer = setInterval(function () {
+      if (finished) return;
+      refreshStatus().catch(function () {});
+    }, 400);
+  }
+
+  async function startCrawlOnVercel() {
+    serverPct = 1;
+    displayPct = 1;
+    running = true;
+    paint();
+    if (els.msg) els.msg.textContent = "Starting crawl…";
+    startPolling();
     try {
-      const res = await fetch(crawlUrl, {
+      await fetch(crawlUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(crawlOptions),
       });
-      const data = await res.json();
-      if (data.message) msg.textContent = data.message;
-      if (data.state === "done") showDone();
-      else if (data.state === "error") showError(data.message);
     } catch (e) {
       showError("Request failed. The crawl may have timed out on Vercel (60s limit).");
     }
   }
 
-  if (initialState === "done") {
-    showDone();
-  } else if (initialState === "error") {
+  // Never treat stale "done" as finished — keep polling if a crawl may be running.
+  if (crawlState === "error") {
     showError({{ status.message|tojson }});
-  } else if (initialState === "running") {
-    if (loading) loading.classList.add("show");
-    poll();
+  } else if (isVercel && crawlState === "pending") {
+    startCrawlOnVercel();
   } else {
-    startCrawl();
+    applyStatus({
+      counts: {{ status.counts|default({'products':0,'collections':0,'pages':0,'total':0})|tojson }},
+      phase: {{ status.phase|default('')|tojson }},
+      phase_label: {{ status.phase_label|default('Starting crawl')|tojson }},
+      display_progress: {{ status.display_progress|default(status.progress)|default(0)|tojson }},
+      message: {{ status.message|default('')|tojson }},
+      state: {{ status.state|default('running')|tojson }},
+      updated_at: {{ status.updated_at|default('')|tojson }},
+      sitemaps_done: {{ status.sitemaps_done|default(0)|tojson }},
+      sitemaps_total: {{ status.sitemaps_total|default(0)|tojson }},
+      discover_entries: {{ status.discover_entries|default(0)|tojson }},
+    });
+    startPolling();
+    if (crawlState === "done") {
+      refreshStatus().then(function () {
+        if (crawlState === "done") showDone();
+      });
+    }
   }
+
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden && !finished) refreshStatus().catch(function () {});
+  });
+})();
 </script>
 {% endblock %}

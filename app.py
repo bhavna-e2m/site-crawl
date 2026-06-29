@@ -6,13 +6,28 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from urllib.parse import unquote
 
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, send_file, url_for
+from flask import (
+    Flask,
+    Response,
+    abort,
+    flash,
+    jsonify,
+    make_response,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    stream_with_context,
+    url_for,
+)
 
 from crawl_site import (
     OUTPUT_DIR,
+    compute_crawl_progress,
     crawl_and_save,
     load_sites,
     read_crawl_status,
@@ -40,6 +55,11 @@ DOWNLOAD_FILES = {
 
 _active_crawls: set[str] = set()
 _crawl_lock = threading.Lock()
+
+
+def is_crawl_active(key: str) -> bool:
+    with _crawl_lock:
+        return key in _active_crawls
 
 
 def load_urls_data(key: str) -> dict:
@@ -83,9 +103,12 @@ def start_background_crawl(
     write_crawl_status(
         key,
         state="running",
-        message="Starting crawl...",
+        message="Starting crawl…",
+        phase="resolve",
         crawl_links=crawl_links,
         fetch_pages=fetch_pages,
+        progress=1,
+        counts={"products": 0, "collections": 0, "pages": 0, "total": 0},
     )
 
     def run() -> None:
@@ -99,8 +122,13 @@ def start_background_crawl(
             write_crawl_status(
                 key,
                 state="done",
-                message=f"Done — {counts['total']} URLs found.",
+                message=(
+                    f"Done — {counts['products']:,} products, "
+                    f"{counts['collections']:,} collections, {counts['pages']:,} pages"
+                ),
+                phase="done",
                 counts=counts,
+                progress=100,
             )
         except Exception as exc:
             write_crawl_status(key, state="error", message=str(exc))
@@ -122,9 +150,12 @@ def run_crawl_sync(
     write_crawl_status(
         key,
         state="running",
-        message="Starting crawl...",
+        message="Starting crawl…",
+        phase="resolve",
         crawl_links=crawl_links,
         fetch_pages=fetch_pages,
+        progress=1,
+        counts={"products": 0, "collections": 0, "pages": 0, "total": 0},
     )
     try:
         _result, _files, counts = crawl_and_save(
@@ -136,8 +167,13 @@ def run_crawl_sync(
         write_crawl_status(
             key,
             state="done",
-            message=f"Done — {counts['total']} URLs found.",
+            message=(
+                f"Done — {counts['products']:,} products, "
+                f"{counts['collections']:,} collections, {counts['pages']:,} pages"
+            ),
+            phase="done",
             counts=counts,
+            progress=100,
         )
         return "done", counts
     except Exception as exc:
@@ -169,6 +205,7 @@ def add_and_crawl():
             key=key,
             crawl_links="1" if crawl_links else "0",
             fetch_pages="1" if fetch_pages else "0",
+            start="1",
         )
     )
 
@@ -179,9 +216,47 @@ def crawl_status_page(key: str):
     if key not in sites:
         flash(f"Site not found: {key}", "error")
         return redirect(url_for("index"))
-    status = read_crawl_status(key) or {"state": "pending", "message": "Preparing crawl..."}
+
     crawl_links = request.args.get("crawl_links") == "1"
     fetch_pages = request.args.get("fetch_pages") == "1"
+    crawl_links_q = "1" if crawl_links else "0"
+    fetch_pages_q = "1" if fetch_pages else "0"
+
+    if request.args.get("start") == "1":
+        status = read_crawl_status(key)
+        stale_running = (
+            status
+            and status.get("state") == "running"
+            and not is_crawl_active(key)
+        )
+        should_start = (
+            not IS_VERCEL
+            and not is_crawl_active(key)
+            and (stale_running or not status or status.get("state") in ("pending", "done", "error"))
+        )
+        if should_start:
+            start_background_crawl(key, crawl_links=crawl_links, fetch_pages=fetch_pages)
+        return redirect(
+            url_for(
+                "crawl_status_page",
+                key=key,
+                crawl_links=crawl_links_q,
+                fetch_pages=fetch_pages_q,
+            )
+        )
+
+    status = read_crawl_status(key)
+    if status is None:
+        status = {
+            "state": "pending",
+            "message": "Waiting to start…",
+            "progress": 0,
+            "counts": {"products": 0, "collections": 0, "pages": 0, "total": 0},
+            "phase_label": "Starting crawl",
+        }
+    else:
+        status = compute_crawl_progress(status)
+
     return render_template(
         "crawl_status.html",
         key=key,
@@ -190,6 +265,7 @@ def crawl_status_page(key: str):
         crawl_links=crawl_links,
         fetch_pages=fetch_pages,
         is_vercel=IS_VERCEL,
+        status_stream_url=url_for("crawl_status_events", key=key),
     )
 
 
@@ -200,7 +276,7 @@ def api_start_crawl(key: str):
         return jsonify({"state": "error", "message": "Site not found"}), 404
 
     existing = read_crawl_status(key)
-    if existing and existing.get("state") == "running":
+    if existing and existing.get("state") == "running" and is_crawl_active(key):
         return jsonify(existing)
 
     data = request.get_json(silent=True) or {}
@@ -218,10 +294,64 @@ def api_start_crawl(key: str):
 
 @app.route("/api/crawl-status/<key>")
 def crawl_status_api(key: str):
-    status = read_crawl_status(key)
+    status = read_crawl_status(key, enrich=True)
     if status is None:
-        return jsonify({"state": "unknown", "message": "No crawl in progress."})
-    return jsonify(status)
+        payload = {
+            "state": "unknown",
+            "message": "No crawl in progress.",
+            "progress": 0,
+            "counts": {"products": 0, "collections": 0, "pages": 0, "total": 0},
+        }
+    else:
+        payload = status
+    response = make_response(jsonify(payload))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
+@app.route("/api/crawl-status/<key>/events")
+def crawl_status_events(key: str):
+    """Server-Sent Events stream — pushes status changes to the browser live."""
+
+    def generate():
+        yield ": connected\n\n"
+        last_revision = -1
+        idle = 0
+        while idle < 120:
+            status = read_crawl_status(key, enrich=True)
+            if status is None:
+                payload = {
+                    "state": "unknown",
+                    "message": "No crawl in progress.",
+                    "progress": 0,
+                    "counts": {"products": 0, "collections": 0, "pages": 0, "total": 0},
+                    "revision": 0,
+                }
+            else:
+                payload = status
+            revision = int(payload.get("revision") or 0)
+            if revision != last_revision:
+                yield f"data: {json.dumps(payload)}\n\n"
+                last_revision = revision
+                idle = 0
+                if payload.get("state") in ("done", "error"):
+                    return
+            else:
+                idle += 1
+                if idle % 5 == 0:
+                    yield ": keepalive\n\n"
+            time.sleep(0.2)
+
+    response = Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Connection"] = "keep-alive"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 @app.route("/site/<key>")
@@ -237,7 +367,11 @@ def site_results(key: str):
         tab = "products"
 
     urls_data = load_urls_data(key)
-    detail = load_detail(key, tab)
+    details = {
+        "products": load_detail(key, "products"),
+        "collections": load_detail(key, "collections"),
+        "pages": load_detail(key, "pages"),
+    }
     downloads = list_downloads(key)
     status = read_crawl_status(key)
 
@@ -254,7 +388,7 @@ def site_results(key: str):
         info=info,
         counts=counts,
         urls=urls_data,
-        detail=detail,
+        details=details,
         tab=tab,
         downloads=downloads,
         crawl_status=status,
@@ -303,6 +437,7 @@ def recrawl(key: str):
             key=key,
             crawl_links="1" if crawl_links else "0",
             fetch_pages="1" if fetch_pages else "0",
+            start="1",
         )
     )
 
