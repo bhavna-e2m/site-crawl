@@ -9,7 +9,7 @@ import queue
 import threading
 import time
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from flask import (
     Flask,
@@ -26,23 +26,41 @@ from flask import (
     url_for,
 )
 
-from crawl_site import (
-    DEFAULT_FETCH_WORKERS,
-    OUTPUT_DIR,
-    compute_crawl_progress,
-    crawl_and_save,
-    load_sites,
-    read_crawl_status,
-    register_site,
-    save_sites,
-    write_crawl_status,
-)
+try:
+    from .crawl_site import (
+        DATA_DIR,
+        DEFAULT_FETCH_WORKERS,
+        OUTPUT_DIR,
+        compute_crawl_progress,
+        crawl_and_save,
+        load_sites,
+        read_crawl_status,
+        register_site,
+        save_sites,
+        write_crawl_status,
+    )
+    from .storage import blob_enabled, load_json, sync_directory
+except ImportError:
+    from crawl_site import (
+        DATA_DIR,
+        DEFAULT_FETCH_WORKERS,
+        OUTPUT_DIR,
+        compute_crawl_progress,
+        crawl_and_save,
+        load_sites,
+        read_crawl_status,
+        register_site,
+        save_sites,
+        write_crawl_status,
+    )
+    from storage import blob_enabled, load_json, sync_directory
 
 ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
 IS_VERCEL = bool(os.environ.get("VERCEL"))
 VERCEL_FETCH_WORKERS = 8
 
-app = Flask(__name__, template_folder=str(ROOT / "templates"))
+app = Flask(__name__, template_folder=str(PROJECT_ROOT / "frontend" / "templates"))
 app.secret_key = os.environ.get("SECRET_KEY", "sitecrawler-dev-key-change-in-production")
 
 DOWNLOAD_FILES = {
@@ -65,21 +83,35 @@ def is_crawl_active(key: str) -> bool:
         return key in _active_crawls
 
 
+def ensure_site(key: str, store_url: str | None = None) -> bool:
+    if key in load_sites():
+        return True
+    if not store_url:
+        return False
+    try:
+        register_site(unquote(store_url), force=True)
+    except Exception:
+        return False
+    return key in load_sites()
+
+
+def _site_url(key: str, store_url: str | None = None) -> str | None:
+    sites = load_sites()
+    if key in sites:
+        return sites[key].get("url")
+    return unquote(store_url) if store_url else None
+
+
 def load_urls_data(key: str) -> dict:
-    urls_data = {"products": [], "collections": [], "pages": []}
-    urls_json = OUTPUT_DIR / key / "urls.json"
-    if urls_json.exists():
-        with urls_json.open(encoding="utf-8") as fh:
-            urls_data = json.load(fh)
-    return urls_data
+    return load_json(
+        DATA_DIR,
+        f"output/{key}/urls.json",
+        {"products": [], "collections": [], "pages": []},
+    )
 
 
 def load_detail(key: str, kind: str) -> list[dict]:
-    path = OUTPUT_DIR / key / f"{kind}_detail.json"
-    if not path.exists():
-        return []
-    with path.open(encoding="utf-8") as fh:
-        data = json.load(fh)
+    data = load_json(DATA_DIR, f"output/{key}/{kind}_detail.json", {})
     return data.get(kind, [])
 
 
@@ -189,7 +221,12 @@ def run_crawl_sync(
 def index():
     sites = load_sites()
     ordered = sorted(sites.items(), key=lambda item: item[1].get("last_crawled_at") or "", reverse=True)
-    return render_template("index.html", sites=ordered)
+    return render_template(
+        "index.html",
+        sites=ordered,
+        is_vercel=IS_VERCEL,
+        blob_enabled=blob_enabled(),
+    )
 
 
 @app.route("/add", methods=["POST"])
@@ -207,6 +244,7 @@ def add_and_crawl():
         url_for(
             "crawl_status_page",
             key=key,
+            url=quote(url, safe=""),
             crawl_links="1" if crawl_links else "0",
             fetch_pages="1" if fetch_pages else "0",
             start="1",
@@ -216,15 +254,19 @@ def add_and_crawl():
 
 @app.route("/crawl-status/<key>")
 def crawl_status_page(key: str):
-    sites = load_sites()
-    if key not in sites:
+    store_url = request.args.get("url")
+    if not ensure_site(key, store_url):
         flash(f"Site not found: {key}", "error")
         return redirect(url_for("index"))
+
+    sites = load_sites()
+    site_url = _site_url(key, store_url)
 
     crawl_links = request.args.get("crawl_links") == "1"
     fetch_pages = request.args.get("fetch_pages") == "1"
     crawl_links_q = "1" if crawl_links else "0"
     fetch_pages_q = "1" if fetch_pages else "0"
+    url_q = quote(site_url, safe="") if site_url else None
 
     if request.args.get("start") == "1":
         status = read_crawl_status(key)
@@ -255,6 +297,7 @@ def crawl_status_page(key: str):
             url_for(
                 "crawl_status_page",
                 key=key,
+                url=url_q,
                 crawl_links=crawl_links_q,
                 fetch_pages=fetch_pages_q,
             )
@@ -317,11 +360,11 @@ def api_start_crawl(key: str):
 @app.route("/api/crawl/<key>/stream", methods=["POST"])
 def api_crawl_stream(key: str):
     """Run crawl in this request and stream live status (required on Vercel serverless)."""
-    sites = load_sites()
-    if key not in sites:
+    data = request.get_json(silent=True) or {}
+    store_url = data.get("url")
+    if not ensure_site(key, store_url):
         return jsonify({"state": "error", "message": "Site not found"}), 404
 
-    data = request.get_json(silent=True) or {}
     crawl_links = bool(data.get("crawl_links"))
     fetch_pages = bool(data.get("fetch_pages"))
     updates: queue.Queue[dict | None] = queue.Queue()
@@ -366,7 +409,13 @@ def api_crawl_stream(key: str):
                 counts=counts,
                 progress=100,
             )
-            push_status()
+            if IS_VERCEL:
+                sync_directory(DATA_DIR, f"output/{key}")
+            done_status = read_crawl_status(key, enrich=True) or {}
+            urls_data = load_urls_data(key)
+            if urls_data.get("products") or urls_data.get("collections") or urls_data.get("pages"):
+                done_status["urls_snapshot"] = urls_data
+            updates.put(done_status)
         except Exception as exc:
             write_crawl_status(key, state="error", message=str(exc))
             push_status()
@@ -463,10 +512,13 @@ def crawl_status_events(key: str):
 
 @app.route("/site/<key>")
 def site_results(key: str):
-    sites = load_sites()
-    if key not in sites:
+    store_url = request.args.get("url")
+    if not ensure_site(key, store_url):
         flash(f"Site not found: {key}", "error")
         return redirect(url_for("index"))
+
+    sites = load_sites()
+    site_url = _site_url(key, store_url)
 
     info = sites[key]
     tab = request.args.get("tab", "products")
@@ -499,15 +551,19 @@ def site_results(key: str):
         tab=tab,
         downloads=downloads,
         crawl_status=status,
+        is_vercel=IS_VERCEL,
+        store_url=site_url,
     )
 
 
 @app.route("/site/<key>/page")
 def page_detail(key: str):
-    sites = load_sites()
-    if key not in sites:
+    store_url = request.args.get("url")
+    if not ensure_site(key, store_url):
         flash(f"Site not found: {key}", "error")
         return redirect(url_for("index"))
+
+    sites = load_sites()
 
     page_url = unquote(request.args.get("url", ""))
     if not page_url:
@@ -537,11 +593,13 @@ def recrawl(key: str):
 
     crawl_links = request.form.get("crawl_links") == "on"
     fetch_pages = request.form.get("fetch_pages") == "on"
+    site_url = sites[key].get("url", "")
 
     return redirect(
         url_for(
             "crawl_status_page",
             key=key,
+            url=quote(site_url, safe="") if site_url else None,
             crawl_links="1" if crawl_links else "0",
             fetch_pages="1" if fetch_pages else "0",
             start="1",

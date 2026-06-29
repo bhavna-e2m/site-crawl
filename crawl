@@ -14,7 +14,7 @@ fi
 
 if [[ "${1:-}" == "ui" ]]; then
   shift
-  exec .venv/bin/python crawl_site.py ui "$@"
+  exec .venv/bin/python backend/crawl_site.py ui "$@"
 fi
 
-exec .venv/bin/python crawl_site.py "$@"
+exec .venv/bin/python backend/crawl_site.py "$@"

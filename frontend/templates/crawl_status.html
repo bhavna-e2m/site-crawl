@@ -139,15 +139,17 @@
 {% block scripts %}
 <script>
 (function () {
+  const siteKey = {{ key|tojson }};
+  const storeUrl = {{ info.url|tojson }};
   const statusUrl = "{{ url_for('crawl_status_api', key=key) }}";
   const streamUrl = {{ status_stream_url|tojson }};
-  const crawlUrl = "{{ url_for('api_start_crawl', key=key) }}";
-  const resultsUrl = "{{ url_for('site_results', key=key) }}";
+  const resultsUrl = "{{ url_for('site_results', key=key) }}?url=" + encodeURIComponent(storeUrl);
   const isVercel = {{ is_vercel|tojson }};
   const autoStart = {{ auto_start|tojson }};
   const crawlOptions = {
     crawl_links: {{ crawl_links|tojson }},
     fetch_pages: {{ fetch_pages|tojson }},
+    url: storeUrl,
   };
   let crawlState = {{ status.state|tojson }};
 
@@ -282,10 +284,15 @@
     }
   }
 
-  function showDone() {
+  function showDone(data) {
     finished = true;
     running = false;
     stopPolling();
+    if (isVercel && data) {
+      try {
+        sessionStorage.setItem("sitecrawl_" + siteKey, JSON.stringify(data));
+      } catch (e) { /* quota */ }
+    }
     serverPct = 100;
     displayPct = 100;
     paint();
@@ -319,7 +326,7 @@
     if (!res.ok) throw new Error("status " + res.status);
     const data = await res.json();
     applyStatus(data);
-    if (data.state === "done") { showDone(); return; }
+    if (data.state === "done") { showDone(data); return; }
     if (data.state === "error") { showError(data.message); return; }
   }
 
@@ -366,7 +373,7 @@
             try {
               const data = JSON.parse(line.slice(6));
               applyStatus(data);
-              if (data.state === "done") showDone();
+              if (data.state === "done") showDone(data);
               else if (data.state === "error") showError(data.message);
             } catch (e) { /* skip bad chunk */ }
           });
@@ -409,7 +416,7 @@
     startPolling();
     if (crawlState === "done") {
       refreshStatus().then(function () {
-        if (crawlState === "done") showDone();
+        if (crawlState === "done") showDone({{ status|tojson }});
       });
     }
   }

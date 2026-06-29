@@ -31,6 +31,11 @@ import requests
 from bs4 import BeautifulSoup
 
 try:
+    from .storage import load_file, load_json, persist_file, save_json, sync_directory
+except ImportError:
+    from storage import load_file, load_json, persist_file, save_json, sync_directory
+
+try:
     from urllib3.exceptions import NotOpenSSLWarning
 
     warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
@@ -162,7 +167,8 @@ def _default_data_dir() -> Path:
         base = Path(os.environ.get("DATA_DIR", "/tmp/sitecrawler/data"))
         base.mkdir(parents=True, exist_ok=True)
         return base
-    return Path(__file__).resolve().parent / "data"
+    backend_dir = Path(__file__).resolve().parent
+    return backend_dir.parent / "data"
 
 
 DATA_DIR = _default_data_dir()
@@ -454,6 +460,9 @@ def write_crawl_status(key: str, **fields) -> None:
             fh.write("\n")
             fh.flush()
         tmp.replace(path)
+        if os.environ.get("VERCEL"):
+            rel = str(path.relative_to(DATA_DIR))
+            persist_file(DATA_DIR, rel, path.read_bytes())
 
 
 def read_crawl_status(key: str, *, enrich: bool = False) -> dict | None:
@@ -692,17 +701,11 @@ def enrich_page_details(
 
 
 def load_sites() -> dict[str, dict]:
-    if not SITES_FILE.exists():
-        return {}
-    with SITES_FILE.open(encoding="utf-8") as fh:
-        return json.load(fh)
+    return load_json(DATA_DIR, "sites.json", {})
 
 
 def save_sites(sites: dict[str, dict]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with SITES_FILE.open("w", encoding="utf-8") as fh:
-        json.dump(sites, fh, indent=2)
-        fh.write("\n")
+    save_json(DATA_DIR, "sites.json", sites)
 
 
 class SiteCrawler:
@@ -1185,6 +1188,8 @@ def crawl_and_save(
     info["output_dir"] = str(site_dir)
     sites[key] = info
     save_sites(sites)
+    if os.environ.get("VERCEL"):
+        sync_directory(DATA_DIR, f"output/{key}")
     return result, files, counts
 
 
@@ -1422,7 +1427,10 @@ def find_available_port(host: str, start: int, limit: int = 20) -> int | None:
 
 
 def cmd_ui(args: argparse.Namespace) -> int:
-    from app import run_server
+    try:
+        from .app import run_server
+    except ImportError:
+        from app import run_server
 
     port = args.port
     if find_available_port(args.host, port, limit=1) is None:
