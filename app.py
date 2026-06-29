@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -26,6 +27,7 @@ from flask import (
 )
 
 from crawl_site import (
+    DEFAULT_FETCH_WORKERS,
     OUTPUT_DIR,
     compute_crawl_progress,
     crawl_and_save,
@@ -38,6 +40,7 @@ from crawl_site import (
 
 ROOT = Path(__file__).resolve().parent
 IS_VERCEL = bool(os.environ.get("VERCEL"))
+VERCEL_FETCH_WORKERS = 8
 
 app = Flask(__name__, template_folder=str(ROOT / "templates"))
 app.secret_key = os.environ.get("SECRET_KEY", "sitecrawler-dev-key-change-in-production")
@@ -163,6 +166,7 @@ def run_crawl_sync(
             crawl_links=crawl_links,
             fetch_pages=fetch_pages,
             status_key=key,
+            fetch_workers=VERCEL_FETCH_WORKERS if IS_VERCEL else DEFAULT_FETCH_WORKERS,
         )
         write_crawl_status(
             key,
@@ -234,7 +238,18 @@ def crawl_status_page(key: str):
             and not is_crawl_active(key)
             and (stale_running or not status or status.get("state") in ("pending", "done", "error"))
         )
-        if should_start:
+        if IS_VERCEL:
+            write_crawl_status(
+                key,
+                state="pending",
+                message="Starting crawl…",
+                phase="resolve",
+                crawl_links=crawl_links,
+                fetch_pages=fetch_pages,
+                progress=1,
+                counts={"products": 0, "collections": 0, "pages": 0, "total": 0},
+            )
+        elif should_start:
             start_background_crawl(key, crawl_links=crawl_links, fetch_pages=fetch_pages)
         return redirect(
             url_for(
@@ -257,6 +272,8 @@ def crawl_status_page(key: str):
     else:
         status = compute_crawl_progress(status)
 
+    auto_start = IS_VERCEL and status.get("state") in ("pending", "running")
+
     return render_template(
         "crawl_status.html",
         key=key,
@@ -265,7 +282,8 @@ def crawl_status_page(key: str):
         crawl_links=crawl_links,
         fetch_pages=fetch_pages,
         is_vercel=IS_VERCEL,
-        status_stream_url=url_for("crawl_status_events", key=key),
+        auto_start=auto_start,
+        status_stream_url=url_for("api_crawl_stream", key=key),
     )
 
 
@@ -284,12 +302,101 @@ def api_start_crawl(key: str):
     fetch_pages = bool(data.get("fetch_pages"))
 
     if IS_VERCEL:
-        run_crawl_sync(key, crawl_links=crawl_links, fetch_pages=fetch_pages)
-        return jsonify(read_crawl_status(key) or {"state": "error", "message": "Crawl finished without status."})
+        run_crawl_sync(
+            key,
+            crawl_links=crawl_links,
+            fetch_pages=fetch_pages,
+        )
+        return jsonify(read_crawl_status(key, enrich=True) or {"state": "error", "message": "Crawl finished without status."})
 
     if not start_background_crawl(key, crawl_links=crawl_links, fetch_pages=fetch_pages):
-        return jsonify(read_crawl_status(key) or {"state": "running", "message": "Crawl already running."})
-    return jsonify(read_crawl_status(key) or {"state": "running", "message": "Starting crawl..."})
+        return jsonify(read_crawl_status(key, enrich=True) or {"state": "running", "message": "Crawl already running."})
+    return jsonify(read_crawl_status(key, enrich=True) or {"state": "running", "message": "Starting crawl..."})
+
+
+@app.route("/api/crawl/<key>/stream", methods=["POST"])
+def api_crawl_stream(key: str):
+    """Run crawl in this request and stream live status (required on Vercel serverless)."""
+    sites = load_sites()
+    if key not in sites:
+        return jsonify({"state": "error", "message": "Site not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    crawl_links = bool(data.get("crawl_links"))
+    fetch_pages = bool(data.get("fetch_pages"))
+    updates: queue.Queue[dict | None] = queue.Queue()
+
+    def push_status() -> None:
+        status = read_crawl_status(key, enrich=True)
+        if status:
+            updates.put(status)
+
+    def on_progress(message: str, **extra) -> None:
+        push_status()
+
+    def run_crawl() -> None:
+        try:
+            write_crawl_status(
+                key,
+                state="running",
+                message="Starting crawl…",
+                phase="resolve",
+                crawl_links=crawl_links,
+                fetch_pages=fetch_pages,
+                progress=1,
+                counts={"products": 0, "collections": 0, "pages": 0, "total": 0},
+            )
+            push_status()
+            _result, _files, counts = crawl_and_save(
+                key,
+                crawl_links=crawl_links,
+                fetch_pages=fetch_pages,
+                status_key=key,
+                on_progress=on_progress,
+                fetch_workers=VERCEL_FETCH_WORKERS if IS_VERCEL else DEFAULT_FETCH_WORKERS,
+            )
+            write_crawl_status(
+                key,
+                state="done",
+                message=(
+                    f"Done — {counts['products']:,} products, "
+                    f"{counts['collections']:,} collections, {counts['pages']:,} pages"
+                ),
+                phase="done",
+                counts=counts,
+                progress=100,
+            )
+            push_status()
+        except Exception as exc:
+            write_crawl_status(key, state="error", message=str(exc))
+            push_status()
+        finally:
+            updates.put(None)
+
+    def generate():
+        yield ": connected\n\n"
+        worker = threading.Thread(target=run_crawl, daemon=True)
+        worker.start()
+        while True:
+            try:
+                item = updates.get(timeout=0.5)
+            except queue.Empty:
+                yield ": keepalive\n\n"
+                continue
+            if item is None:
+                return
+            yield f"data: {json.dumps(item)}\n\n"
+            if item.get("state") in ("done", "error"):
+                return
+
+    response = Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+    )
+    response.headers["Cache-Control"] = "no-cache, no-transform"
+    response.headers["Connection"] = "keep-alive"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 @app.route("/api/crawl-status/<key>")

@@ -1123,10 +1123,10 @@ def crawl_and_save(
     status_id = status_key or key
 
     def report(message: str, **extra) -> None:
-        if on_progress:
-            on_progress(message, **extra)
         if status_key is not None:
             write_crawl_status(status_id, message=message, state="running", **extra)
+        if on_progress:
+            on_progress(message, **extra)
 
     report("Discovering URLs from sitemap…", phase="discover", progress=5)
 
